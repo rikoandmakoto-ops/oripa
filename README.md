@@ -1,36 +1,216 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ORIPA — オンラインオリパ プラットフォーム
 
-## Getting Started
+トレーディングカードのオンラインオリパ（ガチャ）プラットフォーム。
+ポケモンカード・遊戯王・ワンピース・MTG など、カードゲームを問わず運用できます。
 
-First, run the development server:
+- **Next.js 16 (App Router) + TypeScript**
+- **Supabase**（認証・DB・ストレージ）
+- **Tailwind CSS v4**
+- **Vercel** デプロイ想定
+
+---
+
+## 抽選方式について
+
+このプラットフォームは **在庫消化型** を採用しています。
+
+パックごとに「どのカードが何本入っているか」を先に確定させ、1口引かれるたびに
+その在庫が実際に減ります。表示される排出確率は `残り本数 ÷ 残り総数` で
+**常に実在庫から導出** され、管理者が確率だけを恣意的に操作することはできません。
+
+純粋な確率型（在庫と無関係に乱数で決める方式）に比べて、
+
+- 「表示していた当たりが実は1本も入っていない」状態が構造的に起こらない
+- 景品表示法上の有利誤認リスクを下げられる
+- ユーザーに残り在庫をそのまま開示できる
+
+という利点があります。
+
+抽選処理は Postgres の `draw_oripa()` 関数の中で、
+**ポイント確認 → 在庫ロック → 抽選 → 在庫減算 → ポイント減算 → 履歴記録**
+までを1トランザクションで実行します。同一パックへの同時アクセスは行ロックで
+直列化されるため、売り越しや「ポイントだけ減ってカードが出ない」状態は発生しません。
+乱数には `pgcrypto` の `gen_random_bytes` を使っています。
+
+---
+
+## セットアップ
+
+### 1. 依存関係
+
+```bash
+npm install
+```
+
+### 2. Supabase プロジェクトを作る
+
+[supabase.com](https://supabase.com) でプロジェクトを作成し、
+**SQL Editor** から以下を **この順番で** 実行します。
+
+| 順 | ファイル | 内容 |
+|----|----------|------|
+| 1 | `supabase/schema.sql` | テーブル・インデックス・RLS ポリシー |
+| 2 | `supabase/functions.sql` | 抽選などの RPC 関数 |
+| 3 | `supabase/seed.sql` | デモ用オリパ4種（任意） |
+
+### 3. 環境変数
+
+```bash
+cp .env.example .env.local
+```
+
+`.env.local` を開いて値を埋めます。Supabase の
+**Project Settings → API** から取得できます。
+
+| 変数 | 説明 |
+|------|------|
+| `NEXT_PUBLIC_SUPABASE_URL` | プロジェクトの URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 公開用の anon キー |
+| `SUPABASE_SERVICE_ROLE_KEY` | **管理操作用。RLS を無視できるので絶対に公開しないこと** |
+| `ENABLE_DEV_TOPUP` | `true` にすると決済なしでポイントを付与できる（開発時のみ） |
+
+未設定のまま起動してもアプリは落ちませんが、オリパは1件も表示されません。
+
+### 4. 認証メールの設定
+
+ログインはパスワード不要の **マジックリンク方式** です。
+Supabase の **Authentication → URL Configuration** で以下を設定してください。
+
+- Site URL: `http://localhost:3000`（本番では実際のドメイン）
+- Redirect URLs: `http://localhost:3000/auth/callback` を追加
+
+### 5. 起動
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+http://localhost:3000 が立ち上がります。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 6. 自分を管理者にする
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+一度ログインしてユーザーを作ってから、Supabase の SQL Editor で実行します。
 
-## Learn More
+```sql
+update public.profiles
+set is_admin = true, points = 100000
+where id = (select id from auth.users where email = 'あなたのメールアドレス');
+```
 
-To learn more about Next.js, take a look at the following resources:
+以降、ヘッダーに「管理」リンクが出ます。
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+---
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 使い方
 
-## Deploy on Vercel
+### 管理者
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1. `/admin` → **＋ オリパを作成** で枠を作る
+2. カードを1枚ずつ登録する（名前・レアリティ・封入数・交換ポイント）
+   - **封入数の合計がそのまま総口数になります**。口数を手入力する必要はありません
+3. カードが揃ったら **公開する** にチェックを入れて保存
+   - カードが0枚のままでは公開できません（引いた瞬間に在庫切れになるため）
+4. `/admin/shipments` で発送申請を処理し、追跡番号を登録
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### ユーザー
+
+1. トップページからオリパを選ぶ
+2. 排出確率と残り在庫を確認して引く（1回 / 5回 / 10回）
+3. マイページで、当たったカードごとに **発送** か **ポイント交換** を選ぶ
+
+---
+
+## ガチャ演出
+
+演出は5段階で構成されています。
+
+| 段階 | 内容 |
+|------|------|
+| チャージ | リングと粒子が中心に収束。この時点ではレアリティを伏せる |
+| 予告 | レアリティ色で光る。上位なら画面が強く揺れ「激アツ」「神引き」が出る |
+| 開封 | フラッシュ＋放射状の光。上位レアなら紙吹雪 |
+| 公開 | カードが裏から3D反転。ホロ光沢とレアリティバッジ |
+| 結果 | 一覧表示と合計交換ポイント |
+
+- **効果音は音声ファイルを持たず、WebAudio でその場で合成しています**
+  （`src/lib/sfx.ts`）。レアリティが上がるほど和音が厚くなります
+- Android では `navigator.vibrate` で触覚フィードバックも出します
+- どの段階でも「スキップ」で結果に飛べます
+- OS の「視差効果を減らす」が有効な場合、演出を流さず結果だけを表示します
+
+### 演出だけを確認する
+
+開発サーバー起動中に **http://localhost:3000/dev/gacha** を開くと、
+ポイントを消費せずレアリティ別・単発/10連の演出を再生できます。
+本番ビルドでは 404 になります。
+
+---
+
+## ディレクトリ構成
+
+```
+supabase/
+  schema.sql        テーブル・RLS
+  functions.sql     抽選などの RPC
+  seed.sql          デモデータ
+src/
+  proxy.ts          セッション更新（Next.js 16 では middleware.ts から改名）
+  lib/
+    supabase/       client(ブラウザ) / server(SSR) / admin(service_role)
+    sfx.ts          WebAudio 効果音
+    rarity.ts       レアリティ定義と演出の格付け
+    legal.ts        特商法表示に使う事業者情報
+  app/
+    page.tsx        トップ（パック一覧）
+    packs/[id]/     パック詳細・確率表・抽選
+    mypage/         獲得カード・発送/交換・履歴
+    points/         チャージ・ポイント履歴
+    admin/          オリパ管理・カード登録・発送管理
+    legal/          特商法 / 利用規約 / プライバシーポリシー
+    api/draw/       抽選 API
+  components/
+    gacha/          演出一式
+```
+
+---
+
+## セキュリティ設計
+
+- 全テーブルで **RLS 有効**。ユーザーは自分の行しか読めず、書き込みは一切できない
+- ポイント残高と `is_admin` は、RLS に加えて **トリガでも書き換えを拒否**
+- 残高の増減はすべて `point_transactions` に記帳され、`balance_after` で追跡可能
+- `SUPABASE_SERVICE_ROLE_KEY` を使うモジュールは `server-only` を import しており、
+  クライアントから誤って読み込むとビルドが失敗する
+- 管理者用のサーバーアクションは、`service_role` を使う前に毎回 `is_admin` を確認する
+- 開発用チャージ API は `ENABLE_DEV_TOPUP` と `NODE_ENV` の二重チェックで、
+  本番では必ず 404 になる
+
+---
+
+## 法務まわり（重要）
+
+`/legal/*` の3ページは **テンプレートです。そのまま公開しないでください。**
+
+公開前に必ず対応が必要なもの:
+
+- [ ] `.env.local` の事業者情報（社名・代表者・所在地・電話番号・連絡先）を実際の値にする
+- [ ] **古物商許可** を取得し、許可番号と公安委員会名を設定する
+      （中古カードを反復継続して売買するため、古物営業法上の許可が必要です）
+- [ ] 利用規約・プライバシーポリシー・特商法表示を **弁護士に確認してもらう**
+- [ ] 資金決済法上の前払式支払手段に該当するか確認する
+      （未使用残高が基準額を超えると、財務局への届出・供託義務が生じます）
+- [ ] 景品表示法の観点で、確率表示と当選価値の表示に問題がないか確認する
+- [ ] 年齢確認の運用方法を決める（現状は規約上の同意のみ）
+- [ ] `LegalLayout` 内の「開発者向けの注意」バナーを削除する
+
+法令の判断は本リポジトリの範囲外です。必ず専門家の確認を受けてください。
+
+---
+
+## 今後の予定（Phase 2）
+
+- [ ] Stripe 決済連携（`credit_points` RPC を webhook から呼ぶ形で実装できます）
+- [ ] ランキング・排出実績の公開
+- [ ] 通知（発送完了メール等）
+- [ ] カード画像のアップロード UI（現状は画像 URL の直接入力）
+- [ ] 天井・確定枠などの演出バリエーション

@@ -1,65 +1,114 @@
-import Image from "next/image";
+import Link from 'next/link'
 
-export default function Home() {
+import { PackCard } from '@/components/PackCard'
+import { createClient } from '@/lib/supabase/server'
+import { categoryLabel } from '@/lib/format'
+import type { OripaPack } from '@/types/db'
+
+// 残り口数は常に最新を見せたいのでキャッシュしない
+export const dynamic = 'force-dynamic'
+
+export default async function HomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ category?: string }>
+}) {
+  const { category } = await searchParams
+  const supabase = await createClient()
+
+  let query = supabase
+    .from('oripa_packs')
+    .select('*')
+    .eq('is_published', true)
+    .order('sort_order', { ascending: false })
+    .order('created_at', { ascending: false })
+
+  if (category) query = query.eq('category', category)
+
+  const { data } = await query
+  const packs = (data ?? []) as OripaPack[]
+
+  // 絞り込みタブ用に、公開中のパックが持つカテゴリだけを集める
+  const { data: allPacks } = await supabase
+    .from('oripa_packs')
+    .select('category')
+    .eq('is_published', true)
+
+  const categories = Array.from(
+    new Set((allPacks ?? []).map((p) => p.category as string))
+  )
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+    <div className="py-4">
+      {/* ヒーロー */}
+      <section className="relative overflow-hidden rounded-3xl border border-line bg-linear-to-br from-brand/20 via-brand-2/15 to-transparent px-6 py-10 text-center">
+        <h1 className="text-3xl font-black leading-tight sm:text-4xl">
+          どのカードゲームでも、
+          <br />
+          <span className="text-gradient">当たるまで引ける。</span>
+        </h1>
+        <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-ink-dim">
+          排出確率と残り在庫をすべて公開。
+          <br />
+          封入内容は事前に確定しているので、後から中身が変わることはありません。
+        </p>
+      </section>
+
+      {/* カテゴリ絞り込み */}
+      {categories.length > 1 && (
+        <nav className="mt-8 flex flex-wrap gap-2">
+          <FilterChip href="/" label="すべて" active={!category} />
+          {categories.map((c) => (
+            <FilterChip
+              key={c}
+              href={`/?category=${encodeURIComponent(c)}`}
+              label={categoryLabel(c)}
+              active={category === c}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+          ))}
+        </nav>
+      )}
+
+      {/* パック一覧 */}
+      <section className="mt-6">
+        {packs.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-line py-20 text-center">
+            <p className="font-bold text-ink-dim">販売中のオリパはありません</p>
+            <p className="mt-2 text-sm text-ink-dim/70">
+              管理画面から作成すると、ここに並びます。
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            {packs.map((p) => (
+              <PackCard key={p.id} pack={p} />
+            ))}
+          </div>
+        )}
+      </section>
     </div>
-  );
+  )
+}
+
+function FilterChip({
+  href,
+  label,
+  active,
+}: {
+  href: string
+  label: string
+  active: boolean
+}) {
+  return (
+    <Link
+      href={href}
+      className={`rounded-full border px-4 py-1.5 text-sm font-medium transition ${
+        active
+          ? 'border-brand bg-brand/15 text-brand'
+          : 'border-line text-ink-dim hover:text-ink'
+      }`}
+    >
+      {label}
+    </Link>
+  )
 }

@@ -1,26 +1,136 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* =========================================================
+   ORIPA :: デザイントークン
+   競合と同じくダークテーマ固定（ライトモードは提供しない）
+   ========================================================= */
+@theme {
+  --color-bg: #07070c;
+  --color-surface: #101018;
+  --color-surface-2: #17172380;
+  --color-line: #26263a;
+  --color-ink: #f2f2f7;
+  --color-ink-dim: #9a9ab0;
+
+  --color-brand: #ff2d78;
+  --color-brand-2: #7b2dff;
+  --color-accent: #00e5ff;
+  --color-gold: #ffc93c;
+
+  /* レアリティ */
+  --color-rarity-s: #ff3d6e;
+  --color-rarity-a: #ffb020;
+  --color-rarity-b: #a855f7;
+  --color-rarity-c: #38bdf8;
+  --color-rarity-d: #64748b;
+
+  --font-sans: var(--font-noto), system-ui, sans-serif;
+
+  --animate-shimmer: shimmer 2.5s linear infinite;
+  --animate-float: float 6s ease-in-out infinite;
+  --animate-pulse-glow: pulse-glow 2s ease-in-out infinite;
+  --animate-spin-slow: spin 14s linear infinite;
+  --animate-rise: rise 1s ease-out forwards;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position:  200% center; }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-10px); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50%      { opacity: 1;    transform: scale(1.08); }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* =========================================================
+   ベース
+   ========================================================= */
+html {
+  color-scheme: dark;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  /* 背景の淡い光。ガチャ画面でも下に敷かれ続ける */
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -10%, #ff2d7822, transparent),
+    radial-gradient(ellipse 60% 50% at 90% 10%, #7b2dff1a, transparent);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* iOS で演出中に画面が引っ張られるのを防ぐ */
+body.gacha-locked {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+::selection {
+  background: var(--color-brand);
+  color: #fff;
+}
+
+/* スクロールバー（デスクトップ） */
+@media (pointer: fine) {
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--color-bg); }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-line);
+    border-radius: 99px;
+    border: 2px solid var(--color-bg);
+  }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a55; }
+}
+
+/* =========================================================
+   ユーティリティ
+   ========================================================= */
+@utility card-surface {
+  background: color-mix(in oklab, var(--color-surface) 85%, transparent);
+  border: 1px solid var(--color-line);
+  backdrop-filter: blur(12px);
+}
+
+/* 見出し用のグラデーション文字 */
+@utility text-gradient {
+  background: linear-gradient(100deg, var(--color-brand), var(--color-gold), var(--color-accent));
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: var(--animate-shimmer);
+}
+
+/* SSR中のちらつきを避けるための初期非表示 */
+@utility will-rise {
+  opacity: 0;
+  animation: var(--animate-rise);
+}
+
+/* =========================================================
+   アクセシビリティ:
+   「視差効果を減らす」設定の人には演出を静める。
+   ガチャの結果自体は変わらない。
+   ========================================================= */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
