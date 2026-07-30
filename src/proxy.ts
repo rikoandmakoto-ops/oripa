@@ -41,7 +41,11 @@ export const config = {
   matcher: [
     /*
      * 静的アセットと画像最適化を除く全パス。
+     *
+     * Stripe の Webhook だけは外す。Cookie セッションを持たない
+     * サーバ間リクエストなのでトークン更新する意味がなく、
+     * 署名検証で使う生ボディに余計な処理を挟みたくない。
      */
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    '/((?!api/stripe/webhook|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 }

@@ -2,27 +2,29 @@ import type { Metadata } from 'next'
 import Link from 'next/link'
 
 import { DevTopup } from '@/components/DevTopup'
+import { ChargePlans } from '@/components/points/ChargePlans'
 import { requireProfile } from '@/lib/auth'
 import { fmtNum } from '@/lib/format'
+import { POINT_PLANS } from '@/lib/points-plans'
+import { isStripeConfigured } from '@/lib/stripe'
 
 export const metadata: Metadata = { title: 'ポイントチャージ' }
 export const dynamic = 'force-dynamic'
 
-/** 販売するポイントの組み合わせ。1pt = 1円 想定。 */
-const PLANS = [
-  { points: 1000, yen: 1000, bonus: 0 },
-  { points: 3000, yen: 3000, bonus: 100 },
-  { points: 5000, yen: 5000, bonus: 300 },
-  { points: 10000, yen: 10000, bonus: 1000 },
-  { points: 30000, yen: 30000, bonus: 4000 },
-]
-
-export default async function PointsPage() {
+export default async function PointsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>
+}) {
   const profile = await requireProfile('/points')
+  const canceled = (await searchParams).canceled === '1'
 
   const devEnabled =
     process.env.ENABLE_DEV_TOPUP === 'true' &&
     process.env.NODE_ENV !== 'production'
+
+  // 決済キーが未設定の環境ではボタンを押せないようにしておく
+  const stripeReady = isStripeConfigured()
 
   return (
     <div className="py-4">
@@ -36,37 +38,27 @@ export default async function PointsPage() {
         </p>
       </div>
 
-      <div className="mt-6 space-y-2">
-        {PLANS.map((p) => (
-          <div
-            key={p.points}
-            className="flex items-center justify-between rounded-xl border border-line bg-surface/60 px-4 py-4"
-          >
-            <div>
-              <p className="text-lg font-black">
-                {fmtNum(p.points + p.bonus)}
-                <span className="ml-1 text-sm font-medium text-ink-dim">pt</span>
-              </p>
-              {p.bonus > 0 && (
-                <p className="text-[11px] font-bold text-brand">
-                  ボーナス +{fmtNum(p.bonus)}pt
-                </p>
-              )}
-            </div>
-            <button
-              type="button"
-              disabled
-              className="cursor-not-allowed rounded-xl border border-line px-5 py-2.5 text-sm font-bold text-ink-dim"
-            >
-              ¥{fmtNum(p.yen)}
-            </button>
-          </div>
-        ))}
-      </div>
+      {canceled && (
+        <p className="mt-4 rounded-xl border border-line bg-surface/60 px-4 py-3 text-sm text-ink-dim">
+          決済をキャンセルしました。ポイントは消費されていません。
+        </p>
+      )}
+
+      <ChargePlans plans={POINT_PLANS} enabled={stripeReady} />
 
       <p className="mt-5 rounded-xl border border-line bg-surface/60 p-4 text-xs leading-relaxed text-ink-dim">
-        決済機能（Stripe 連携）は準備中です。
-        <br />
+        {stripeReady ? (
+          <>
+            決済は Stripe
+            の安全な決済ページで行われます。カード情報が当サイトに保存されることはありません。
+            <br />
+          </>
+        ) : (
+          <>
+            決済機能（Stripe 連携）は現在準備中です。
+            <br />
+          </>
+        )}
         購入されたポイントの有効期限は最終利用日から180日間です。ポイントの現金への払い戻しは行っておりません。
       </p>
 

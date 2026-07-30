@@ -53,6 +53,10 @@ npm install
 | 2 | `supabase/functions.sql` | 抽選などの RPC 関数 |
 | 3 | `supabase/seed.sql` | デモ用オリパ4種（任意） |
 
+Stripe 決済（ポイントチャージ）を使う場合は、続けて
+`supabase/migrations/0002_stripe_payments.sql` も実行します。
+手順の全体は [`docs/stripe-setup.md`](docs/stripe-setup.md) にまとめてあります。
+
 ### 3. 環境変数
 
 ```bash
@@ -68,8 +72,12 @@ cp .env.example .env.local
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 公開用の anon キー |
 | `SUPABASE_SERVICE_ROLE_KEY` | **管理操作用。RLS を無視できるので絶対に公開しないこと** |
 | `ENABLE_DEV_TOPUP` | `true` にすると決済なしでポイントを付与できる（開発時のみ） |
+| `STRIPE_SECRET_KEY` | Stripe のシークレットキー。**未設定ならチャージボタンは押せません** |
+| `STRIPE_WEBHOOK_SECRET` | Webhook の署名シークレット。これが無いとポイントは付与されません |
+| `NEXT_PUBLIC_SITE_URL` | 決済後の戻り先ドメイン（任意。未設定なら自動判定） |
 
 未設定のまま起動してもアプリは落ちませんが、オリパは1件も表示されません。
+Stripe のキーが無い場合も起動はできます（チャージ導線が無効になるだけ）。
 
 ### 4. 認証メールの設定
 
@@ -153,10 +161,15 @@ supabase/
   schema.sql        テーブル・RLS
   functions.sql     抽選などの RPC
   seed.sql          デモデータ
+  migrations/       追加分の SQL（0002 = Stripe 決済）
+scripts/
+  *.command         ダブルクリックで動く補助スクリプト
 src/
   proxy.ts          セッション更新（Next.js 16 では middleware.ts から改名）
   lib/
     supabase/       client(ブラウザ) / server(SSR) / admin(service_role)
+    stripe.ts       Stripe クライアント（遅延初期化・server-only）
+    points-plans.ts 販売プラン定義（金額はここが唯一の正）
     sfx.ts          WebAudio 効果音
     rarity.ts       レアリティ定義と演出の格付け
     legal.ts        特商法表示に使う事業者情報
@@ -164,12 +177,15 @@ src/
     page.tsx        トップ（パック一覧）
     packs/[id]/     パック詳細・確率表・抽選
     mypage/         獲得カード・発送/交換・履歴
-    points/         チャージ・ポイント履歴
+    points/         チャージ・決済完了・ポイント履歴
     admin/          オリパ管理・カード登録・発送管理
     legal/          特商法 / 利用規約 / プライバシーポリシー
     api/draw/       抽選 API
+    api/checkout/   Checkout Session 作成
+    api/stripe/webhook/  入金確定 → ポイント付与（ここだけが残高を増やせる）
   components/
     gacha/          演出一式
+    points/         チャージ導線
 ```
 
 ---
@@ -184,6 +200,34 @@ src/
 - 管理者用のサーバーアクションは、`service_role` を使う前に毎回 `is_admin` を確認する
 - 開発用チャージ API は `ENABLE_DEV_TOPUP` と `NODE_ENV` の二重チェックで、
   本番では必ず 404 になる
+- ポイントが増える経路は `credit_points()` の1本だけ。決済も調達失敗の返還も
+  すべてここを通るので、`profiles.points` と台帳の合計が食い違わない
+
+---
+
+## 決済（Stripe）
+
+ポイントチャージは **Stripe Checkout**（Stripe がホストする決済ページ）で行います。
+カード情報がこのアプリを通ることはありません。
+
+```
+/points → POST /api/checkout → Stripe の決済ページ → /points/complete
+                                        │
+                                        └─ POST /api/stripe/webhook → ポイント付与
+```
+
+- 請求額は **プラン ID からサーバ側で引き直します**。
+  クライアントが送ってくる金額やポイント数は一切使いません
+- **ポイントが増えるのは Webhook が届いたときだけ** です。
+  成功 URL に戻ってきたことは入金の証明にならないため、`/points/complete` は
+  `payments` の状態を表示しているだけです
+- Webhook は同じイベントが複数回届く前提で、`payments` 行のロックと
+  ステータス判定によって **付与は1回きり**（冪等）になっています
+- Stripe のキーが未設定なら、チャージボタンは無効・`/api/checkout` は 503・
+  Webhook は 404 を返します
+
+設定手順・環境変数・本番デプロイの流れは
+[`docs/stripe-setup.md`](docs/stripe-setup.md) にまとめてあります。
 
 ---
 
@@ -209,7 +253,7 @@ src/
 
 ## 今後の予定（Phase 2）
 
-- [ ] Stripe 決済連携（`credit_points` RPC を webhook から呼ぶ形で実装できます）
+- [x] Stripe 決済連携（`credit_points` RPC を webhook から呼ぶ形で実装済み）
 - [ ] ランキング・排出実績の公開
 - [ ] 通知（発送完了メール等）
 - [ ] カード画像のアップロード UI（現状は画像 URL の直接入力）

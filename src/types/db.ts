@@ -108,3 +108,29 @@ export type DrawResult = {
   balance: number
   spent: number
 }
+
+/* ================================================================
+   決済 (Stripe)
+   ================================================================ */
+
+export type PaymentStatus = 'pending' | 'paid' | 'failed' | 'expired'
+
+export type Payment = {
+  id: string
+  user_id: string
+  /** src/lib/points-plans.ts のプラン ID */
+  plan_id: string
+  /** 請求額(円) */
+  amount_yen: number
+  points: number
+  bonus_points: number
+  status: PaymentStatus
+  stripe_session_id: string | null
+  stripe_payment_intent_id: string | null
+  /** 実際に付与したポイント。付与前は 0 */
+  credited_points: number
+  failure_reason: string
+  created_at: string
+  updated_at: string
+  paid_at: string | null
+}
