@@ -1,55 +1,132 @@
 'use client'
 
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { haptics } from '@/lib/haptics'
 import { fmtNum } from '@/lib/format'
+import {
+  chainIndex,
+  hashSeed,
+  makeRng,
+  planSteps,
+  reelPattern,
+  type Step,
+  type StepKind,
+} from '@/lib/gacha-director'
 import { RARITY, rarityOf, topRarity } from '@/lib/rarity'
 import {
   sfxBurst,
   sfxCharge,
   sfxFanfare,
   sfxFlip,
+  sfxRainbow,
   sfxReveal,
+  sfxSparkle,
   sfxTease,
 } from '@/lib/sfx'
 import type { DrawnCard } from '@/types/db'
 
 import { CardBack, CardVisual } from './CardVisual'
+import { ChainStage } from './effects/ChainStage'
+import { CrackStage } from './effects/CrackStage'
+import { CutInStage } from './effects/CutInStage'
+import { DrumStage } from './effects/DrumStage'
+import { FreezeStage } from './effects/FreezeStage'
+import { Particles } from './effects/Particles'
+import { RainbowFlash } from './effects/RainbowFlash'
+import { ReelStage } from './effects/ReelStage'
 
-type Phase = 'charge' | 'tease' | 'burst' | 'reveal' | 'summary'
+/** 導入演出が終わったあとの段階 */
+type Mode = 'intro' | 'reveal' | 'chain' | 'summary'
 
-/** 各フェーズの尺(ms)。演出の全体像がここだけ見れば分かるようにしている。 */
-const TIMING = {
-  charge: 1400,
-  tease: 900,
-  burst: 520,
-} as const
+/** 連続演出の尺(ms) */
+const CHAIN_MS = 1900
+
+/**
+ * 常設レイヤー（背景色・パーティクル・レインボー）を、
+ * どの段階から出してよいかの一覧。
+ *
+ * - color … レアリティ色。リールが止まる前に出すと結果が割れるので伏せる
+ * - particles … 粒子。色を出してよくなってから
+ * - rainbow … 虹。最高レアの“payoff”なので、割れ〜開放まで引っ張る
+ *
+ * フリーズは出た時点で最高レア確定なので色は出してよいが、
+ * 虹と粒子まで出すと画面が白く飽和して「凍った」感じが消える。
+ * ここを一覧で持っているのは、その手の綱引きを 1 か所で調整するため。
+ */
+type Layers = { color: boolean; particles: boolean; rainbow: boolean }
+
+const STEP_LAYERS: Record<StepKind, Layers> = {
+  freeze: { color: true, particles: false, rainbow: false },
+  charge: { color: false, particles: false, rainbow: false },
+  drum: { color: false, particles: false, rainbow: false },
+  reel: { color: false, particles: false, rainbow: false },
+  cutin: { color: true, particles: true, rainbow: false },
+  tease: { color: true, particles: true, rainbow: false },
+  crack: { color: true, particles: true, rainbow: true },
+  burst: { color: true, particles: true, rainbow: true },
+}
+
+/** 導入が終わったあとのレイヤー。結果一覧は読ませたいので虹も粒子も止める */
+const MODE_LAYERS: Record<Exclude<Mode, 'intro'>, Layers> = {
+  reveal: { color: true, particles: true, rainbow: true },
+  chain: { color: true, particles: true, rainbow: true },
+  summary: { color: true, particles: false, rainbow: false },
+}
 
 export function GachaOverlay({
   cards,
   packTitle,
   onClose,
   onDrawAgain,
+  plan: planOverride,
 }: {
   cards: DrawnCard[]
   packTitle: string
   onClose: () => void
   onDrawAgain?: () => void
+  /** 演出プレビュー用。渡すと director の代わりにこの手順を再生する */
+  plan?: Step[]
 }) {
   const reduceMotion = useReducedMotion()
-  const [rawPhase, setPhase] = useState<Phase>('charge')
+  const [stepIdx, setStepIdx] = useState(0)
+  const [rawMode, setMode] = useState<Mode>('intro')
   const [index, setIndex] = useState(0)
+  const [chainShown, setChainShown] = useState(false)
 
   // 「視差効果を減らす」設定の人には演出を流さず、結果だけ見せる。
   // state を書き換えるのではなく描画時に読み替えることで、
   // 設定が途中で変わっても破綻しない。
-  const phase: Phase = reduceMotion ? 'summary' : rawPhase
+  const mode: Mode = reduceMotion ? 'summary' : rawMode
 
   const best = topRarity(cards.map((c) => c.rarity))
   const bestTier = RARITY[best].tier
   const bestStyle = RARITY[best]
+
+  // 手順は抽選結果から決まる。
+  // planSteps はガセ演出を乱数で混ぜるが、draw_id を種にすることで
+  // 同じ抽選なら何度描画しても同じ構成になる（＝描画中に演出が変わらない）。
+  const plan = useMemo(
+    () =>
+      planOverride ??
+      planSteps(bestTier, makeRng(hashSeed(cards[0]?.draw_id ?? ''))),
+    [planOverride, bestTier, cards]
+  )
+
+  // 導入演出中だけ step が入る。reveal 以降は undefined になり、
+  // 下の描画はこの有無で「導入か本編か」を分けている。
+  const step = mode === 'intro' ? plan[stepIdx] : undefined
+
+  // 10連の途中に挟む連続演出の位置
+  const chainAt = useMemo(
+    () => chainIndex(cards.map((c) => rarityOf(c.rarity).tier)),
+    [cards]
+  )
+
+  const layers = step ? STEP_LAYERS[step.kind] : MODE_LAYERS[mode as Exclude<Mode, 'intro'>]
+  const colorShown = layers.color
+  const rainbow = bestTier >= 4 && layers.rainbow
 
   // 演出中の裏スクロールを止める
   useEffect(() => {
@@ -58,38 +135,31 @@ export function GachaOverlay({
   }, [])
 
   // ------------------------------------------------------------------
-  // 演出タイムライン
-  // reduceMotion が有効な場合は一気に結果まで飛ばす
+  // 導入演出のタイムライン。
+  // 手順の尺を積み上げて、各ステップの開始時刻に setStepIdx を撃つ。
+  //
+  // 効果音は「単純な演出（charge/tease/burst）はここで鳴らし、
+  // 内部に独自の間を持つ演出（reel/drum/cutin/freeze/crack）は
+  // コンポーネント自身が鳴らす」という分担にしている。
+  // 後者は自分の進行と音を合わせる必要があるため。
   // ------------------------------------------------------------------
   useEffect(() => {
     if (reduceMotion) return
 
     const timers: ReturnType<typeof setTimeout>[] = []
+    let at = 0
 
-    sfxCharge(TIMING.charge / 1000)
-    haptics.charge()
+    plan.forEach((s, i) => {
+      timers.push(
+        setTimeout(() => {
+          setStepIdx(i)
+          fireStepSound(s, bestTier, bestStyle.color)
+        }, at)
+      )
+      at += s.ms
+    })
 
-    timers.push(
-      setTimeout(() => {
-        setPhase('tease')
-        sfxTease(bestTier)
-      }, TIMING.charge)
-    )
-
-    timers.push(
-      setTimeout(() => {
-        setPhase('burst')
-        sfxBurst(bestTier)
-        haptics.burst()
-        if (bestTier >= 3) void fireConfetti(bestStyle.color)
-      }, TIMING.charge + TIMING.tease)
-    )
-
-    timers.push(
-      setTimeout(() => {
-        setPhase('reveal')
-      }, TIMING.charge + TIMING.tease + TIMING.burst)
-    )
+    timers.push(setTimeout(() => setMode('reveal'), at))
 
     return () => timers.forEach(clearTimeout)
     // マウント時に1度だけ組む。cards は同一ドローの結果で不変。
@@ -98,7 +168,7 @@ export function GachaOverlay({
 
   // カードが1枚表示されるたびに鳴らす
   useEffect(() => {
-    if (phase !== 'reveal') return
+    if (mode !== 'reveal') return
     const card = cards[index]
     if (!card) return
     const tier = rarityOf(card.rarity).tier
@@ -112,27 +182,42 @@ export function GachaOverlay({
       }
     }, 380)
     return () => clearTimeout(t)
-  }, [phase, index, cards])
+  }, [mode, index, cards])
 
   const advance = useCallback(() => {
-    if (phase !== 'reveal') return
-    if (index < cards.length - 1) {
-      setIndex((i) => i + 1)
-    } else {
-      setPhase('summary')
-    }
-  }, [phase, index, cards.length])
+    if (mode !== 'reveal') return
 
-  const skipToSummary = useCallback(() => setPhase('summary'), [])
+    if (index >= cards.length - 1) {
+      setMode('summary')
+      return
+    }
+
+    const next = index + 1
+
+    // 大物の直前で 1 度だけ連続演出を挟む
+    if (next === chainAt && !chainShown) {
+      setChainShown(true)
+      setMode('chain')
+      setTimeout(() => {
+        setIndex(next)
+        setMode('reveal')
+      }, CHAIN_MS)
+      return
+    }
+
+    setIndex(next)
+  }, [mode, index, cards.length, chainAt, chainShown])
+
+  const skipToSummary = useCallback(() => setMode('summary'), [])
 
   // キーボード操作（Space/Enter で送る、Esc で結果へ）
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
-        if (phase === 'summary') onClose()
+        if (mode === 'summary') onClose()
         else skipToSummary()
       } else if (e.key === ' ' || e.key === 'Enter') {
-        if (phase === 'reveal') {
+        if (mode === 'reveal') {
           e.preventDefault()
           advance()
         }
@@ -140,7 +225,7 @@ export function GachaOverlay({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [phase, advance, skipToSummary, onClose])
+  }, [mode, advance, skipToSummary, onClose])
 
   const totalValue = cards.reduce((s, c) => s + c.point_value, 0)
 
@@ -151,11 +236,17 @@ export function GachaOverlay({
       aria-modal="true"
       aria-label="ガチャ結果"
     >
-      {/* 背景のうねる光。全フェーズ通して敷く */}
-      <BackdropGlow color={bestStyle.color} tier={bestTier} phase={phase} />
+      {/* 全フェーズ通して敷く常設レイヤー */}
+      <BackdropGlow
+        color={bestStyle.color}
+        tier={bestTier}
+        colorShown={colorShown}
+      />
+      {rainbow && <RainbowFlash intense={mode === 'intro'} />}
+      {layers.particles && <Particles tier={bestTier} color={bestStyle.color} />}
 
       {/* スキップ */}
-      {phase !== 'summary' && (
+      {mode !== 'summary' && (
         <button
           type="button"
           onClick={skipToSummary}
@@ -166,17 +257,54 @@ export function GachaOverlay({
       )}
 
       <AnimatePresence mode="wait">
-        {phase === 'charge' && <ChargeStage key="charge" />}
+        {step?.kind === 'freeze' && <FreezeStage key="freeze" ms={step.ms} />}
 
-        {phase === 'tease' && (
+        {step?.kind === 'charge' && <ChargeStage key="charge" />}
+
+        {step?.kind === 'drum' && (
+          <DrumStage key="drum" ms={step.ms} color={bestStyle.color} />
+        )}
+
+        {step?.kind === 'reel' && (
+          <ReelStage
+            key="reel"
+            ms={step.ms}
+            tier={bestTier}
+            pattern={reelPattern(bestTier)}
+          />
+        )}
+
+        {step?.kind === 'cutin' && (
+          <CutInStage
+            key="cutin"
+            ms={step.ms}
+            tier={bestTier}
+            color={bestStyle.color}
+          />
+        )}
+
+        {step?.kind === 'tease' && (
           <TeaseStage key="tease" color={bestStyle.color} tier={bestTier} />
         )}
 
-        {phase === 'burst' && (
-          <BurstStage key="burst" color={bestStyle.color} />
+        {step?.kind === 'crack' && (
+          <CrackStage key="crack" ms={step.ms} color={bestStyle.color} />
         )}
 
-        {phase === 'reveal' && (
+        {step?.kind === 'burst' && (
+          <BurstStage key="burst" color={bestStyle.color} tier={bestTier} />
+        )}
+
+        {mode === 'chain' && (
+          <ChainStage
+            key="chain"
+            ms={CHAIN_MS}
+            color={bestStyle.color}
+            remaining={cards.length - index - 1}
+          />
+        )}
+
+        {mode === 'reveal' && (
           <RevealStage
             key={`reveal-${index}`}
             card={cards[index]}
@@ -186,7 +314,7 @@ export function GachaOverlay({
           />
         )}
 
-        {phase === 'summary' && (
+        {mode === 'summary' && (
           <SummaryStage
             key="summary"
             cards={cards}
@@ -201,21 +329,44 @@ export function GachaOverlay({
   )
 }
 
+/** 単純な演出の効果音。複雑な演出は各コンポーネントが自分で鳴らす */
+function fireStepSound(step: Step, tier: number, color: string) {
+  switch (step.kind) {
+    case 'charge':
+      sfxCharge(step.ms / 1000)
+      haptics.charge()
+      break
+    case 'tease':
+      sfxTease(tier)
+      break
+    case 'burst':
+      sfxBurst(tier)
+      haptics.burst()
+      if (tier >= 4) {
+        sfxRainbow()
+        sfxSparkle(16)
+      }
+      if (tier >= 3) void fireConfetti(color)
+      break
+    default:
+      break
+  }
+}
+
 /* ==================================================================
    背景
    ================================================================== */
 function BackdropGlow({
   color,
   tier,
-  phase,
+  colorShown,
 }: {
   color: string
   tier: number
-  phase: Phase
+  colorShown: boolean
 }) {
-  // 予告以降はレアリティ色を出す。それ以前は色を伏せる（＝ネタバレ防止）
-  const revealed = phase !== 'charge'
-  const c = revealed ? color : '#5b5bff'
+  // 色を伏せる区間はニュートラルな青紫にしておく（＝ネタバレ防止）
+  const c = colorShown ? color : '#5b5bff'
 
   return (
     <>
@@ -229,7 +380,7 @@ function BackdropGlow({
         }}
         transition={{ duration: 1.6, repeat: Infinity, repeatType: 'reverse' }}
       />
-      {revealed && tier >= 3 && (
+      {colorShown && tier >= 3 && (
         <motion.div
           className="pointer-events-none absolute left-1/2 top-1/2 h-[160vmax] w-[160vmax] -translate-x-1/2 -translate-y-1/2 opacity-25"
           style={{
@@ -244,7 +395,7 @@ function BackdropGlow({
 }
 
 /* ==================================================================
-   1. チャージ — エネルギーが集まる
+   チャージ — エネルギーが集まる
    ================================================================== */
 function ChargeStage() {
   return (
@@ -317,7 +468,7 @@ function ChargeStage() {
 }
 
 /* ==================================================================
-   2. 予告 — 色でレアリティを匂わせる（いわゆる色違い予告）
+   予告 — 色でレアリティを匂わせる（いわゆる色違い予告）
    ================================================================== */
 function TeaseStage({ color, tier }: { color: string; tier: number }) {
   const shake = tier >= 3 ? 14 : tier >= 2 ? 7 : 3
@@ -370,9 +521,9 @@ function TeaseStage({ color, tier }: { color: string; tier: number }) {
 }
 
 /* ==================================================================
-   3. 開封 — フラッシュ
+   開封 — フラッシュ
    ================================================================== */
-function BurstStage({ color }: { color: string }) {
+function BurstStage({ color, tier }: { color: string; tier: number }) {
   return (
     <motion.div
       className="absolute inset-0"
@@ -391,12 +542,25 @@ function BurstStage({ color }: { color: string }) {
         animate={{ width: '180vmax', height: '180vmax', opacity: 0 }}
         transition={{ duration: 0.5, ease: 'easeOut' }}
       />
+      {/* 最高レアだけ、追い打ちで虹の輪を広げる */}
+      {tier >= 4 && (
+        <motion.div
+          className="absolute left-1/2 top-1/2 rounded-full mix-blend-screen"
+          style={{
+            background:
+              'conic-gradient(from 0deg, red, orange, yellow, lime, cyan, blue, magenta, red)',
+          }}
+          initial={{ width: 0, height: 0, x: '-50%', y: '-50%', opacity: 0.85 }}
+          animate={{ width: '200vmax', height: '200vmax', opacity: 0 }}
+          transition={{ duration: 0.75, delay: 0.12, ease: 'easeOut' }}
+        />
+      )}
     </motion.div>
   )
 }
 
 /* ==================================================================
-   4. カード公開
+   カード公開
    ================================================================== */
 function RevealStage({
   card,
@@ -502,7 +666,7 @@ function RevealStage({
 }
 
 /* ==================================================================
-   5. 結果一覧
+   結果一覧
    ================================================================== */
 function SummaryStage({
   cards,

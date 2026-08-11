@@ -67,7 +67,17 @@ export function prime() {
     ctx = new Ctor()
     master = ctx.createGain()
     master.gain.value = enabled ? 0.6 : 0
-    master.connect(ctx.destination)
+
+    // 演出が派手になると和太鼓・カットイン・きらめきが同時に鳴って
+    // 簡単にクリップするので、出口にコンプレッサーを噛ませて頭を潰す。
+    const comp = ctx.createDynamicsCompressor()
+    comp.threshold.value = -14
+    comp.knee.value = 24
+    comp.ratio.value = 8
+    comp.attack.value = 0.003
+    comp.release.value = 0.2
+
+    master.connect(comp).connect(ctx.destination)
   }
   // iOS はタブ復帰などで suspended になるので毎回起こす
   if (ctx.state === 'suspended') void ctx.resume()
@@ -205,4 +215,183 @@ export function sfxFanfare() {
 /** カードめくり */
 export function sfxFlip() {
   noise(0.12, { gain: 0.12, hp: 2000 })
+}
+
+/* ===================================================================
+   ここから下は大型演出用の効果音。
+   リール・和太鼓・カットイン・画面割れなど、
+   演出コンポーネントと 1 対 1 で対応する。
+   =================================================================== */
+
+/**
+ * バンドパスを掃引するノイズ。
+ * 「シュンッ」というスウッシュ系はこれ 1 本で作れる。
+ */
+function swoosh(
+  duration: number,
+  fromHz: number,
+  toHz: number,
+  opts: { delay?: number; gain?: number; q?: number } = {}
+) {
+  const r = ready()
+  if (!r) return
+  const { ac, out } = r
+  const t0 = ac.currentTime + (opts.delay ?? 0)
+
+  const frames = Math.floor(ac.sampleRate * duration)
+  const buf = ac.createBuffer(1, frames, ac.sampleRate)
+  const data = buf.getChannelData(0)
+  for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1
+
+  const src = ac.createBufferSource()
+  src.buffer = buf
+
+  const filter = ac.createBiquadFilter()
+  filter.type = 'bandpass'
+  filter.Q.value = opts.q ?? 4
+  filter.frequency.setValueAtTime(fromHz, t0)
+  filter.frequency.exponentialRampToValueAtTime(Math.max(1, toHz), t0 + duration)
+
+  const env = ac.createGain()
+  env.gain.setValueAtTime(0.0001, t0)
+  env.gain.exponentialRampToValueAtTime(opts.gain ?? 0.3, t0 + duration * 0.35)
+  env.gain.exponentialRampToValueAtTime(0.0001, t0 + duration)
+
+  src.connect(filter).connect(env).connect(out)
+  src.start(t0)
+}
+
+/**
+ * 和太鼓の「ドンッ」。
+ * 低音の急激なピッチ落ち＋皮の鳴りのノイズで作る。
+ * @param power 0〜1。大きいほど深く重い音になる（カウントダウンの終盤で上げる）
+ */
+export function sfxDrum(power = 0.6, delay = 0) {
+  const top = 150 + power * 110
+  // 胴の響き
+  tone(top, 0.42 + power * 0.25, {
+    type: 'sine',
+    gain: 0.34 + power * 0.24,
+    sweepTo: 44,
+    delay,
+  })
+  // 倍音（張りを出す）
+  tone(top * 1.6, 0.16, {
+    type: 'triangle',
+    gain: 0.1 + power * 0.08,
+    sweepTo: 70,
+    delay,
+  })
+  // 皮のアタック
+  noise(0.1, { gain: 0.16 + power * 0.14, lp: 1400, delay })
+}
+
+/** リール回転中のカラカラ音。duration 秒ぶんをまとめて予約する */
+export function sfxReelSpin(duration: number) {
+  const step = 0.055
+  const count = Math.floor(duration / step)
+  for (let i = 0; i < count; i++) {
+    noise(0.02, { gain: 0.045, hp: 2600, delay: i * step })
+  }
+  // 回転そのもののうなり
+  tone(90, duration, { type: 'sawtooth', gain: 0.05, sweepTo: 130 })
+}
+
+/**
+ * リールが 1 本止まる「ガコンッ」。
+ * @param index 何本目か。後のリールほど低く重く鳴らして緊張感を出す
+ */
+export function sfxReelStop(index: number, delay = 0) {
+  const pitch = 260 - index * 45
+  tone(pitch, 0.12, { type: 'square', gain: 0.2, sweepTo: pitch * 0.6, delay })
+  noise(0.09, { gain: 0.2, hp: 1200, delay })
+  tone(pitch / 2, 0.22, { type: 'sine', gain: 0.16, sweepTo: 50, delay })
+}
+
+/** テンパイ（あと 1 本で揃う）ときの持続音 */
+export function sfxTenpai() {
+  tone(880, 1.1, { type: 'triangle', gain: 0.1 })
+  tone(1320, 1.1, { type: 'sine', gain: 0.06, delay: 0.04 })
+}
+
+/** カットイン。切り裂くようなスウッシュ＋衝撃 */
+export function sfxCutIn(tier: number) {
+  swoosh(0.36, 5200, 320, { gain: 0.34, q: 3 })
+  tone(180, 0.3, { type: 'sawtooth', gain: 0.22, sweepTo: 60, delay: 0.24 })
+  noise(0.22, { gain: 0.22, lp: 5000, delay: 0.24 })
+  if (tier >= 4) {
+    // 最高レアはもう一撃返す
+    swoosh(0.3, 400, 6000, { gain: 0.26, q: 3, delay: 0.42 })
+    tone(1046.5, 0.5, { type: 'square', gain: 0.1, delay: 0.5 })
+  }
+}
+
+/**
+ * フリーズ突入音。
+ * いったん空気を抜いてから極低音で押し潰す、パチンコのフリーズの質感。
+ */
+export function sfxFreeze() {
+  // 吸い込み（逆再生ふうの上昇→切断）
+  swoosh(0.5, 200, 4800, { gain: 0.24, q: 2 })
+  // 底が抜ける
+  tone(58, 1.5, { type: 'sine', gain: 0.4, sweepTo: 28, delay: 0.5 })
+  tone(87, 1.4, { type: 'sine', gain: 0.16, sweepTo: 42, delay: 0.52 })
+  // 金属的な余韻
+  tone(2400, 1.2, { type: 'sine', gain: 0.05, sweepTo: 1800, delay: 0.55 })
+}
+
+/** ヒビが 1 本入る音。連続で呼んで割れていく過程を作る */
+export function sfxCrack(delay = 0, pitch = 1) {
+  noise(0.07, { gain: 0.2, hp: 4000, delay })
+  tone(2600 * pitch, 0.09, {
+    type: 'square',
+    gain: 0.07,
+    sweepTo: 1200 * pitch,
+    delay,
+  })
+}
+
+/** 画面が砕け散る音。破片が降る余韻付き */
+export function sfxShatter() {
+  noise(0.6, { gain: 0.34, hp: 1800 })
+  tone(120, 0.5, { type: 'sine', gain: 0.34, sweepTo: 34 })
+  // 破片が跳ねる高音を散らす
+  for (let i = 0; i < 14; i++) {
+    tone(1800 + Math.random() * 3600, 0.16, {
+      type: 'triangle',
+      gain: 0.05,
+      delay: 0.06 + Math.random() * 0.7,
+    })
+  }
+}
+
+/** レインボー突入。上昇アルペジオ＋きらめき */
+export function sfxRainbow() {
+  const scale = [523.25, 587.33, 659.25, 783.99, 880, 1046.5, 1318.5, 1568]
+  scale.forEach((f, i) => {
+    tone(f, 0.6, { type: 'triangle', gain: 0.13, delay: i * 0.055 })
+    tone(f * 2, 0.4, { type: 'sine', gain: 0.05, delay: i * 0.055 + 0.01 })
+  })
+  noise(1.6, { gain: 0.07, hp: 7000, delay: 0.3 })
+  tone(65.4, 1.8, { type: 'sine', gain: 0.2 })
+}
+
+/** 10 連の途中に挟まる連続演出の合図。「デデーン」 */
+export function sfxChain() {
+  sfxDrum(0.85)
+  sfxDrum(0.95, 0.22)
+  tone(392, 0.7, { type: 'square', gain: 0.12, delay: 0.24 })
+  tone(523.25, 0.7, { type: 'square', gain: 0.12, delay: 0.3 })
+  noise(0.9, { gain: 0.06, hp: 6000, delay: 0.3 })
+}
+
+/** 粒子が舞うきらめき。パーティクル演出に薄く重ねる */
+export function sfxSparkle(count = 10) {
+  for (let i = 0; i < count; i++) {
+    tone(2200 + Math.random() * 2800, 0.22, {
+      type: 'sine',
+      gain: 0.04,
+      delay: Math.random() * 0.9,
+    })
+  }
 }
