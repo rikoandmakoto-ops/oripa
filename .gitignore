@@ -24,6 +24,20 @@
 .DS_Store
 *.pem
 
+# LibreOffice の編集中ロックファイル
+.~lock.*#
+
+# 一時ファイル（LibreOffice のエクスポート途中など）
+*.tmp
+
+# PDF / PPTX から書き出した中間画像。正本は docs/ の PDF・DOCX 側なのでコミットしない
+/page-*.jpg
+/slide-*.jpg
+docs/page-*.jpg
+docs/slide-*.jpg
+docs/allphase-*.jpg
+docs/kobutsu-page-*.jpg
+
 # debug
 npm-debug.log*
 yarn-debug.log*
