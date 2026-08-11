@@ -1,6 +1,12 @@
 export type Rarity = 'S' | 'A' | 'B' | 'C' | 'D'
 
-export type DrawStatus = 'pending' | 'converted' | 'ship_requested' | 'shipped'
+export type DrawStatus =
+  | 'pending'
+  | 'converted'
+  | 'ship_requested'
+  | 'shipped'
+  /** 仮在庫の調達に失敗し、ポイントを返還した */
+  | 'refunded'
 
 export type PointTxType =
   | 'charge'
@@ -90,6 +96,76 @@ export type Shipment = {
   tracking_number: string | null
   created_at: string
   shipped_at: string | null
+}
+
+/* ================================================================
+   仮在庫モデル
+   ================================================================ */
+
+/** 仕入れ先の識別子。'manual' は管理者が手で登録・更新するもの。 */
+export type ShopCode = 'manual' | 'yuyutei' | 'cardrush' | 'toretoku' | 'yahoo'
+
+export type SourceStockStatus =
+  | 'in_stock'
+  | 'low_stock'
+  | 'out_of_stock'
+  | 'unknown'
+
+export type ProcurementStatus =
+  | 'pending'
+  | 'ordered'
+  | 'shipped'
+  | 'completed'
+  | 'failed'
+
+export type CardSource = {
+  id: string
+  card_id: string
+  shop_code: ShopCode
+  shop_name: string
+  url: string
+  /** 円。ポイントは 1pt = 1円 換算で利益率を出す */
+  price: number
+  stock_status: SourceStockStatus
+  stock_quantity: number | null
+  /** 小さいほど優先。1 が第一候補。 */
+  priority: number
+  is_active: boolean
+  note: string
+  last_checked_at: string
+  created_at: string
+  updated_at: string
+}
+
+export type ProcurementTask = {
+  id: string
+  draw_id: string
+  user_id: string
+  card_id: string
+  shipment_id: string | null
+  status: ProcurementStatus
+  source_id: string | null
+  purchase_price: number | null
+  /** 発送申請時点で最安だった仕入れ先価格 */
+  estimated_price: number | null
+  failure_reason: string
+  refunded_points: number
+  admin_note: string
+  ordered_at: string | null
+  completed_at: string | null
+  failed_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type PriceHistory = {
+  id: string
+  source_id: string
+  card_id: string
+  price: number
+  stock_status: SourceStockStatus
+  source_kind: 'manual' | 'crawler' | 'api'
+  checked_at: string
 }
 
 /** draw_oripa RPC が返す1枚分のカード */

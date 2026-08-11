@@ -27,6 +27,18 @@ export default async function AdminHome() {
     .select('id', { count: 'exact', head: true })
     .in('status', ['requested', 'preparing'])
 
+  // 仮在庫モデル: まだ買いに行けていないカードの件数
+  const { count: openProcurement } = await admin
+    .from('procurement_tasks')
+    .select('id', { count: 'exact', head: true })
+    .in('status', ['pending', 'ordered', 'shipped'])
+
+  const { count: outOfStockSources } = await admin
+    .from('card_sources')
+    .select('id', { count: 'exact', head: true })
+    .eq('is_active', true)
+    .eq('stock_status', 'out_of_stock')
+
   return (
     <div className="py-4">
       <div className="flex items-center justify-between">
@@ -39,19 +51,27 @@ export default async function AdminHome() {
         </Link>
       </div>
 
-      <Link
-        href="/admin/shipments"
-        className="mt-5 flex items-center justify-between rounded-2xl border border-line bg-surface/60 px-5 py-4 transition hover:border-brand"
-      >
-        <span className="font-bold">発送管理</span>
-        <span className="text-sm text-ink-dim">
-          未処理{' '}
-          <span className="font-black text-brand">
-            {fmtNum(pendingShipments ?? 0)}
-          </span>{' '}
-          件 →
-        </span>
-      </Link>
+      <nav className="mt-5 space-y-2">
+        <NavCard
+          href="/admin/procurement"
+          label="調達タスク"
+          countLabel="未完了"
+          count={openProcurement ?? 0}
+        />
+        <NavCard
+          href="/admin/shipments"
+          label="発送管理"
+          countLabel="未処理"
+          count={pendingShipments ?? 0}
+        />
+        <NavCard
+          href="/admin/sources"
+          label="仕入れ先"
+          countLabel="在庫切れ"
+          count={outOfStockSources ?? 0}
+          alert={(outOfStockSources ?? 0) > 0}
+        />
+      </nav>
 
       <h2 className="mt-10 text-lg font-black">オリパ一覧</h2>
 
@@ -110,5 +130,35 @@ export default async function AdminHome() {
         </ul>
       )}
     </div>
+  )
+}
+
+function NavCard({
+  href,
+  label,
+  countLabel,
+  count,
+  alert,
+}: {
+  href: string
+  label: string
+  countLabel: string
+  count: number
+  alert?: boolean
+}) {
+  return (
+    <Link
+      href={href}
+      className="flex items-center justify-between rounded-2xl border border-line bg-surface/60 px-5 py-4 transition hover:border-brand"
+    >
+      <span className="font-bold">{label}</span>
+      <span className="text-sm text-ink-dim">
+        {countLabel}{' '}
+        <span className={`font-black ${alert ? 'text-rarity-s' : 'text-brand'}`}>
+          {fmtNum(count)}
+        </span>{' '}
+        件 →
+      </span>
+    </Link>
   )
 }

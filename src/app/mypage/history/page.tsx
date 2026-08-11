@@ -15,6 +15,7 @@ const STATUS_LABEL: Record<string, string> = {
   converted: 'ポイント交換済',
   ship_requested: '発送申請中',
   shipped: '発送済み',
+  refunded: '調達不可・返還済み',
 }
 
 export default async function DrawHistoryPage() {

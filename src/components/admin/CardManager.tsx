@@ -1,30 +1,49 @@
 'use client'
 
 import { useRouter } from 'next/navigation'
-import { useState, useTransition } from 'react'
+import React, { useState, useTransition } from 'react'
 
 import { fmtNum, fmtProbability } from '@/lib/format'
+import { bestSource, fmtRate, fmtYen, packMargin } from '@/lib/procurement'
 import { RARITY, RARITY_ORDER } from '@/lib/rarity'
-import type { OripaCard, Rarity } from '@/types/db'
+import type { CardSource, OripaCard, Rarity } from '@/types/db'
+
+import { CardSourceManager } from '@/components/admin/CardSourceManager'
 
 import { addCard, deleteCard } from '@/app/admin/actions'
 
 export function CardManager({
   packId,
+  pricePoints,
   cards,
+  sources,
 }: {
   packId: string
+  /** 1口の販売価格。仕入れ先ごとの粗利表示に使う。 */
+  pricePoints: number
   cards: OripaCard[]
+  sources: CardSource[]
 }) {
   const router = useRouter()
   const [pending, startTransition] = useTransition()
   const [open, setOpen] = useState(cards.length === 0)
+  const [expanded, setExpanded] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(
     null
   )
 
   const totalStock = cards.reduce((s, c) => s + c.stock, 0)
   const totalRemaining = cards.reduce((s, c) => s + c.remaining, 0)
+
+  const sourcesByCard = new Map<string, CardSource[]>()
+  for (const s of sources) {
+    const arr = sourcesByCard.get(s.card_id) ?? []
+    arr.push(s)
+    sourcesByCard.set(s.card_id, arr)
+  }
+
+  // 総口数 = 封入数の合計。全部売れたときの売上と原価を出す。
+  const packProfit = packMargin(pricePoints, totalStock, cards, sourcesByCard)
 
   function onAdd(form: FormData) {
     startTransition(async () => {
@@ -66,8 +85,29 @@ export function CardManager({
 
       <p className="mt-1.5 text-xs leading-relaxed text-ink-dim">
         封入数の合計がそのまま総口数になります（現在 {fmtNum(totalStock)}口 ／
-        残り {fmtNum(totalRemaining)}口）。
+        残り {fmtNum(totalRemaining)}口）。カード名をタップすると仕入れ先を登録できます。
       </p>
+
+      {cards.length > 0 && (
+        <div className="mt-3 rounded-2xl border border-line bg-surface/60 p-4">
+          <p className="text-xs font-black">想定利益（全口が売れた場合）</p>
+          <dl className="mt-2.5 grid grid-cols-3 gap-2 text-center">
+            <Stat label="想定売上" value={fmtYen(packProfit.revenue)} />
+            <Stat label="想定原価" value={fmtYen(packProfit.cost)} />
+            <Stat
+              label="粗利"
+              value={`${fmtYen(packProfit.profit)}（${fmtRate(packProfit.rate)}）`}
+              tone={packProfit.profit >= 0 ? 'ok' : 'bad'}
+            />
+          </dl>
+          {packProfit.unsourcedCards > 0 && (
+            <p className="mt-2.5 text-[11px] text-rarity-s">
+              仕入れ先が未登録のカードが {packProfit.unsourcedCards}
+              種類あります。原価に含まれていないため、実際の利益率はこれより低くなります。
+            </p>
+          )}
+        </div>
+      )}
 
       {feedback && (
         <p
@@ -158,53 +198,120 @@ export function CardManager({
                 <th className="px-3 py-2.5 text-right font-medium">残/封入</th>
                 <th className="px-3 py-2.5 text-right font-medium">確率</th>
                 <th className="px-3 py-2.5 text-right font-medium">交換pt</th>
+                <th className="px-3 py-2.5 text-right font-medium">仕入れ</th>
                 <th className="px-3 py-2.5" />
               </tr>
             </thead>
             <tbody>
-              {cards.map((c) => (
-                <tr key={c.id} className="border-t border-line">
-                  <td className="px-3 py-2.5">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="rounded px-1.5 py-0.5 text-[10px] font-black text-black"
-                        style={{ background: RARITY[c.rarity as Rarity].color }}
-                      >
-                        {RARITY[c.rarity as Rarity].label}
-                      </span>
-                      <span className="truncate">{c.name}</span>
-                      {c.is_hit && (
-                        <span className="shrink-0 text-[10px] text-gold">
-                          ★目玉
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-3 py-2.5 text-right tabular-nums text-ink-dim">
-                    {c.remaining}/{c.stock}
-                  </td>
-                  <td className="px-3 py-2.5 text-right tabular-nums">
-                    {fmtProbability(c.remaining, totalRemaining)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right tabular-nums text-gold">
-                    {fmtNum(c.point_value)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right">
-                    <button
-                      type="button"
-                      disabled={pending}
-                      onClick={() => onDelete(c.id, c.name)}
-                      className="text-xs text-ink-dim transition hover:text-rarity-s disabled:opacity-50"
-                    >
-                      削除
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {cards.map((c) => {
+                const cardSources = sourcesByCard.get(c.id) ?? []
+                const best = bestSource(cardSources)
+                const isOpen = expanded === c.id
+
+                return (
+                  <React.Fragment key={c.id}>
+                    <tr className="border-t border-line">
+                      <td className="px-3 py-2.5">
+                        <button
+                          type="button"
+                          onClick={() => setExpanded(isOpen ? null : c.id)}
+                          className="flex w-full items-center gap-2 text-left"
+                        >
+                          <span
+                            className="rounded px-1.5 py-0.5 text-[10px] font-black text-black"
+                            style={{
+                              background: RARITY[c.rarity as Rarity].color,
+                            }}
+                          >
+                            {RARITY[c.rarity as Rarity].label}
+                          </span>
+                          <span className="truncate">{c.name}</span>
+                          {c.is_hit && (
+                            <span className="shrink-0 text-[10px] text-gold">
+                              ★目玉
+                            </span>
+                          )}
+                          <span className="shrink-0 text-[10px] text-ink-dim">
+                            {isOpen ? '▲' : '▼'}
+                          </span>
+                        </button>
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-ink-dim">
+                        {c.remaining}/{c.stock}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums">
+                        {fmtProbability(c.remaining, totalRemaining)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-gold">
+                        {fmtNum(c.point_value)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums">
+                        {best ? (
+                          fmtYen(best.price)
+                        ) : (
+                          <span
+                            className="text-rarity-s"
+                            title="調達可能な仕入れ先が未登録です"
+                          >
+                            未登録
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 text-right">
+                        <button
+                          type="button"
+                          disabled={pending}
+                          onClick={() => onDelete(c.id, c.name)}
+                          className="text-xs text-ink-dim transition hover:text-rarity-s disabled:opacity-50"
+                        >
+                          削除
+                        </button>
+                      </td>
+                    </tr>
+
+                    {isOpen && (
+                      <tr className="border-t border-line">
+                        <td colSpan={6} className="bg-bg/40 p-2.5">
+                          <CardSourceManager
+                            packId={packId}
+                            cardId={c.id}
+                            cardName={c.name}
+                            pricePoints={pricePoints}
+                            sources={cardSources}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                )
+              })}
             </tbody>
           </table>
         </div>
       )}
+    </div>
+  )
+}
+
+function Stat({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone?: 'ok' | 'bad'
+}) {
+  return (
+    <div className="rounded-xl bg-bg/60 px-2 py-2.5">
+      <dt className="text-[10px] text-ink-dim">{label}</dt>
+      <dd
+        className={`mt-0.5 text-xs font-black tabular-nums ${
+          tone === 'ok' ? 'text-accent' : tone === 'bad' ? 'text-rarity-s' : ''
+        }`}
+      >
+        {value}
+      </dd>
     </div>
   )
 }

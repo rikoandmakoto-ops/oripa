@@ -7,7 +7,7 @@ import { DeletePackButton } from '@/components/admin/DeletePackButton'
 import { PackForm } from '@/components/admin/PackForm'
 import { requireAdmin } from '@/lib/auth'
 import { createAdminClient } from '@/lib/supabase/admin'
-import type { OripaCard, OripaPack } from '@/types/db'
+import type { CardSource, OripaCard, OripaPack } from '@/types/db'
 
 export const metadata: Metadata = { title: 'オリパを編集' }
 export const dynamic = 'force-dynamic'
@@ -37,6 +37,19 @@ export default async function EditPackPage({
     .order('sort_order', { ascending: false })
     .order('created_at', { ascending: true })
 
+  const cardList = (cards ?? []) as OripaCard[]
+
+  // 仕入れ先はカードごとに引くと N+1 になるので、パック分をまとめて取る
+  const { data: sources } = cardList.length
+    ? await admin
+        .from('card_sources')
+        .select('*')
+        .in(
+          'card_id',
+          cardList.map((c) => c.id)
+        )
+    : { data: [] }
+
   return (
     <div className="mx-auto max-w-2xl py-4">
       <Link href="/admin" className="text-sm text-ink-dim hover:text-ink">
@@ -61,7 +74,12 @@ export default async function EditPackPage({
       </section>
 
       <section className="mt-12">
-        <CardManager packId={id} cards={(cards ?? []) as OripaCard[]} />
+        <CardManager
+          packId={id}
+          pricePoints={(pack as OripaPack).price_points}
+          cards={cardList}
+          sources={(sources ?? []) as CardSource[]}
+        />
       </section>
 
       <section className="mt-16 rounded-2xl border border-rarity-s/30 bg-rarity-s/5 p-5">

@@ -319,3 +319,215 @@ export async function updateShipment(
   revalidatePath('/admin/shipments')
   return { ok: true, message: '更新しました。' }
 }
+
+/* ================================================================
+   仮在庫: 仕入れ先
+   ================================================================ */
+
+const SourceSchema = z.object({
+  shop_code: z.enum(['manual', 'yuyutei', 'cardrush', 'toretoku', 'yahoo']),
+  shop_name: z.string().trim().min(1, 'ショップ名を入力してください').max(80),
+  url: z.string().trim().url('仕入れ先URLの形式が正しくありません').max(1000),
+  price: z.coerce.number().int().min(0, '価格は0円以上で入力してください').max(100000000),
+  stock_status: z.enum(['in_stock', 'low_stock', 'out_of_stock', 'unknown']),
+  priority: z.coerce.number().int().min(1, '優先度は1以上です').max(99),
+  note: z.string().trim().max(300).optional().default(''),
+})
+
+export async function addCardSource(
+  packId: string,
+  cardId: string,
+  form: FormData
+): Promise<ActionResult> {
+  const denied = await assertAdmin()
+  if (denied) return { ok: false, error: denied }
+
+  const parsed = SourceSchema.safeParse({
+    shop_code: form.get('shop_code'),
+    shop_name: form.get('shop_name'),
+    url: form.get('url'),
+    price: form.get('price'),
+    stock_status: form.get('stock_status'),
+    priority: form.get('priority'),
+    note: form.get('note') ?? '',
+  })
+
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.issues[0]?.message ?? '入力エラー' }
+  }
+
+  const admin = createAdminClient()
+  const { error } = await admin
+    .from('card_sources')
+    .insert({ card_id: cardId, ...parsed.data })
+
+  if (error) {
+    console.error('addCardSource failed', error)
+    return { ok: false, error: '仕入れ先の登録に失敗しました。' }
+  }
+
+  revalidatePath(`/admin/packs/${packId}`)
+  revalidatePath('/admin/sources')
+  return { ok: true, message: '仕入れ先を登録しました。' }
+}
+
+/**
+ * 在庫状態と価格の手動更新（Phase 1 の巡回代わり）。
+ * last_checked_at を更新することで「いつ確認したか」が一覧で追える。
+ * 価格か在庫が動いていれば price_history にトリガで積まれる。
+ */
+const SourceUpdateSchema = z.object({
+  price: z.coerce.number().int().min(0).max(100000000),
+  stock_status: z.enum(['in_stock', 'low_stock', 'out_of_stock', 'unknown']),
+  priority: z.coerce.number().int().min(1).max(99),
+  is_active: z.coerce.boolean(),
+})
+
+export async function updateCardSource(
+  sourceId: string,
+  form: FormData
+): Promise<ActionResult> {
+  const denied = await assertAdmin()
+  if (denied) return { ok: false, error: denied }
+
+  const parsed = SourceUpdateSchema.safeParse({
+    price: form.get('price'),
+    stock_status: form.get('stock_status'),
+    priority: form.get('priority'),
+    is_active: form.get('is_active') === 'on',
+  })
+
+  if (!parsed.success) {
+    return { ok: false, error: '入力内容が正しくありません。' }
+  }
+
+  const admin = createAdminClient()
+  const { error } = await admin
+    .from('card_sources')
+    .update({ ...parsed.data, last_checked_at: new Date().toISOString() })
+    .eq('id', sourceId)
+
+  if (error) {
+    console.error('updateCardSource failed', error)
+    return { ok: false, error: '更新に失敗しました。' }
+  }
+
+  revalidatePath('/admin/sources')
+  revalidatePath('/admin/packs', 'layout')
+  return { ok: true, message: '更新しました。' }
+}
+
+export async function deleteCardSource(
+  packId: string,
+  sourceId: string
+): Promise<ActionResult> {
+  const denied = await assertAdmin()
+  if (denied) return { ok: false, error: denied }
+
+  const admin = createAdminClient()
+
+  // 調達実績のある仕入れ先を消すと「どこから買ったか」が追えなくなる
+  const { count } = await admin
+    .from('procurement_tasks')
+    .select('id', { count: 'exact', head: true })
+    .eq('source_id', sourceId)
+
+  if (count) {
+    return {
+      ok: false,
+      error: `この仕入れ先は${count}件の調達に使われているため削除できません。「有効」を外してください。`,
+    }
+  }
+
+  const { error } = await admin.from('card_sources').delete().eq('id', sourceId)
+  if (error) {
+    console.error('deleteCardSource failed', error)
+    return { ok: false, error: '削除に失敗しました。' }
+  }
+
+  revalidatePath(`/admin/packs/${packId}`)
+  revalidatePath('/admin/sources')
+  return { ok: true, message: '削除しました。' }
+}
+
+/* ================================================================
+   仮在庫: 調達タスク
+   ================================================================ */
+
+const ProcurementSchema = z.object({
+  status: z.enum(['pending', 'ordered', 'shipped', 'completed', 'failed']),
+  source_id: z.string().uuid().or(z.literal('')).optional().default(''),
+  purchase_price: z.coerce.number().int().min(0).max(100000000).optional(),
+  admin_note: z.string().trim().max(500).optional().default(''),
+  failure_reason: z.string().trim().max(300).optional().default(''),
+})
+
+/**
+ * 調達タスクのステータス更新。
+ *
+ * 返還を伴う「失敗」は、ポイント加算と draws の更新を1トランザクションに
+ * まとめる必要があるので RPC 側でやる。ここは権限確認と入力検証だけ。
+ */
+export async function updateProcurementTask(
+  taskId: string,
+  form: FormData
+): Promise<ActionResult> {
+  const denied = await assertAdmin()
+  if (denied) return { ok: false, error: denied }
+
+  const rawPrice = form.get('purchase_price')
+  const parsed = ProcurementSchema.safeParse({
+    status: form.get('status'),
+    source_id: form.get('source_id') ?? '',
+    purchase_price: rawPrice === null || rawPrice === '' ? undefined : rawPrice,
+    admin_note: form.get('admin_note') ?? '',
+    failure_reason: form.get('failure_reason') ?? '',
+  })
+
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.issues[0]?.message ?? '入力エラー' }
+  }
+
+  const { status, source_id, purchase_price, admin_note, failure_reason } =
+    parsed.data
+
+  if (status === 'failed' && !failure_reason) {
+    return { ok: false, error: '失敗にする場合は理由を入力してください。' }
+  }
+
+  const admin = createAdminClient()
+  const { data, error } = await admin.rpc('set_procurement_status', {
+    p_task_id: taskId,
+    p_status: status,
+    p_source_id: source_id || null,
+    p_purchase_price: purchase_price ?? null,
+    p_admin_note: admin_note,
+    p_failure_reason: failure_reason,
+  })
+
+  if (error) {
+    if (error.message.includes('ALREADY_REFUNDED')) {
+      return {
+        ok: false,
+        error: 'このタスクは返還済みのため、ステータスを戻せません。',
+      }
+    }
+    if (error.message.includes('TASK_NOT_FOUND')) {
+      return { ok: false, error: '調達タスクが見つかりませんでした。' }
+    }
+    console.error('set_procurement_status failed', error)
+    return { ok: false, error: '更新に失敗しました。' }
+  }
+
+  revalidatePath('/admin/procurement')
+  revalidatePath('/admin/shipments')
+
+  const refunded = (data as { refunded: number } | null)?.refunded ?? 0
+  return {
+    ok: true,
+    message:
+      refunded > 0
+        ? `失敗として記録し、${refunded.toLocaleString('ja-JP')}pt を返還しました。`
+        : '更新しました。',
+  }
+}
